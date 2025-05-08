@@ -1,59 +1,46 @@
 import requests
-import csv
-from datetime import datetime
+import sys
 
+# Configuration
 PROMETHEUS_URL = "http://localhost:9090"
 
-# PromQL queries for metrics
-PROMQL = {
+# Define PromQL queries for key metrics
+graph_queries = {
+    "requests per second per backend": 'sum by (instance)(rate(http_requests_total{job="backend_servers"}[1m]))',
     "load_balancer_total_requests": 'sum(http_requests_total{job="load_balancer"})',
-    "backend_total_requests": 'sum by (instance)(http_requests_total{job="backend_servers"})',
-    "avg_latency": 'rate(http_request_duration_seconds_sum[1m]) / rate(http_request_duration_seconds_count[1m])',
-    "error_rate": 'sum(rate(http_requests_total{status!~"2.."}[1m]))'
+    "backend_total_requests": 'sum(http_requests_total{job="backend_servers"})',
+    "load_balancer_avg_latency": 'rate(http_request_duration_seconds_sum{job="load_balancer"}[30s]) / rate(http_request_duration_seconds_count{job="load_balancer"}[1m])',
+    "backend_avg_latency": 'sum by (instance)(rate(http_request_duration_seconds_sum{job="backend_servers"}[30s])) / sum by (instance)(rate(http_request_duration_seconds_count{job="backend_servers"}[1m]))',
+    "load_balancer_error_rate": 'sum(rate(http_requests_total{job="load_balancer",status!~"2.."}[1m]))',
+    "backend_error_rate": 'sum by (instance)(rate(http_requests_total{job="backend_servers",status!~"2.."}[1m]))'
 }
 
-def query_prometheus(promql):
-    response = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
-    result = response.json()
-    if result["status"] == "success" and result["data"]["result"]:
-        return result["data"]["result"]
-    return []
 
-def extract_value(results, label=None):
+def query_prometheus(promql: str):
+    """
+    Query Prometheus API and return the 'value' for the first result.
+    """
+    resp = requests.get(f"{PROMETHEUS_URL}/api/v1/query", params={"query": promql})
+    if resp.status_code != 200:
+        print(f"Error querying Prometheus: {resp.status_code}", file=sys.stderr)
+        return None
+    data = resp.json()
+    results = data.get("data", {}).get("result", [])
     if not results:
-        return 0
-    if label:
-        return {item['metric'].get(label, 'unknown'): float(item['value'][1]) for item in results}
-    return float(results[0]['value'][1])
+        return 0.0
+    # Each result has ['value'] = [ timestamp, value_str ]
+    return float(results[0]["value"][1])
 
-def log_to_csv(data):
-    filename = "benchmark_results.csv"
-    fieldnames = list(data.keys())
 
-    try:
-        with open(filename, 'x', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerow(data)
-    except FileExistsError:
-        with open(filename, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writerow(data)
-
-def run_benchmark_record():
-    data = {
-        "timestamp": datetime.now().isoformat(),
-        "load_balancer_total_requests": extract_value(query_prometheus(PROMQL["load_balancer_total_requests"])),
-        "error_rate": extract_value(query_prometheus(PROMQL["error_rate"])),
-        "avg_latency": extract_value(query_prometheus(PROMQL["avg_latency"])),
-    }
-
-    backend_counts = extract_value(query_prometheus(PROMQL["backend_total_requests"]), label="instance")
-    for instance, count in backend_counts.items():
-        data[f"requests_{instance}"] = count
-
-    log_to_csv(data)
-    print("✅ Benchmark data logged to CSV.")
+def main():
+    print("Fetching metrics from Prometheus...\n")
+    metrics = {}
+    for name, promql in graph_queries.items():
+        val = query_prometheus(promql)
+        metrics[name] = val
+    # Pretty-print
+    for key, value in metrics.items():
+        print(f"{key}: {value}")
 
 if __name__ == "__main__":
-    run_benchmark_record()
+    main()

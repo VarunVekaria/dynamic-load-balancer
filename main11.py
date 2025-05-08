@@ -8,10 +8,13 @@ import psutil
 app = FastAPI()
 Instrumentator().instrument(app).expose(app)
 
+# Prepare one client (with keep-alive) for all requests
+client = httpx.AsyncClient(timeout=10.0)
+
 with open("servers.json") as f:
     servers = json.load(f)
-
 server_urls = [s["url"] for s in servers]
+
 last_index = -1
 lock = Lock()
 
@@ -21,17 +24,22 @@ def get_next_server():
         last_index = (last_index + 1) % len(server_urls)
         return server_urls[last_index]
 
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+@app.on_event("shutdown")
+async def shutdown_event():
+    await client.aclose()
+
+@app.api_route("/{path:path}", methods=["GET","POST","PUT","DELETE","PATCH"])
 async def proxy(path: str, request: Request):
     backend_url = get_next_server()
     full_url = f"{backend_url}/{path}"
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method=request.method,
-            url=full_url,
-            headers=request.headers.raw,
-            content=await request.body()
-        )
+
+    # forward using the *same* client (reuses sockets)
+    response = await client.request(
+        request.method,
+        full_url,
+        headers=request.headers.raw,
+        content=await request.body()
+    )
     return response.json()
 
 @app.get("/metrics")
